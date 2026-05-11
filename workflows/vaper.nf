@@ -41,7 +41,7 @@ workflow VAPER {
     */
     // SUBWORKFLOW: Read in samplesheet, validate and stage input files
 
-    ref_set = file(params.ref_set)
+    ref_set = params.ref_set ? file(params.ref_set) : []
 
     PREPARE (
         ch_samplesheet,

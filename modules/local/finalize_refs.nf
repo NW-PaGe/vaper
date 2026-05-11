@@ -1,6 +1,7 @@
 process FINALIZE_REFS {
     tag "${meta.id}"
     label 'process_low'
+    stageInMode 'copy'
 
     input:
     tuple val(meta), path(ref, stageAs: "input/*")

@@ -166,7 +166,12 @@ workflow CLASSIFY {
     */
     // Combine any manually supplied reference paths
     ch_ref
-        .concat( ch_ref_man.map{meta, ref, inc, exc -> [meta, ref]}.filter{it[1]} )
+        .concat(
+            ch_ref_man
+                .map{meta, ref, inc, exc -> [meta, ref]}
+                .transpose()
+                .filter{meta, ref -> ref}
+        )
         .groupTuple(by: 0)
         .set{ ch_ref }
 
