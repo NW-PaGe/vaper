@@ -7,7 +7,7 @@ reports:
     display: "Consensus assembly"
   "**/assembly_tidy/*.fa*":
     display: "Tidy Consensus assembly"
-  "**/align/*:":
+  "**/align/*":
     display: "Read alignments (view in IGV)"
   "**/qc/*":
     display: "Quality metrics"
