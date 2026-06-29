@@ -75,38 +75,42 @@ workflow PREPARE {
         .concat(FASTERQDUMP.out.reads)
         .set{ ch_reads }
     
-    //
-    // MODULE: Downsample reads with Seqtk Subseq
-    //
-    if(params.max_reads){
-        // determine samples with too many reads
+    // Downsample high-coverage samples
+    if (params.max_reads) {
         ch_reads
-            .map{ meta, reads -> [ meta: meta, reads: reads, n: reads[0].countFastq()*2 ] }
-            .branch{ it -> 
-                ok: it.n <= params.max_reads
-                high: it.n > params.max_reads  }
-            .set{ ch_reads }
-        // create foward and reverse read channels
-        ch_reads
-            .high
-            .map{it -> [ it.meta, it.reads[0], params.max_reads ] }
-            .set{ch_fwd}
-        ch_reads
-            .high
-            .map{ it -> [ it.meta, it.reads[1], params.max_reads ] }
-            .set{ch_rev}
+            .map { meta, reads ->
+                def read_count
+                try {
+                    read_count = reads[0].countFastq() * 2
+                } catch (Exception e) {
+                    log.warn "${meta.id}: Failed to count reads - will attempt downsampling anyway!"
+                    read_count = params.max_reads + 1
+                }
+                [meta: meta, reads: reads, n: read_count]
+            }
+            .branch {
+                ok:   it.n <= params.max_reads
+                high: it.n > params.max_reads
+            }
+            .set { ch_reads_branched }
 
+        // Downsample R1 and R2 separately
         SEQTK_SAMPLE(
-            ch_fwd.concat(ch_rev)
+            ch_reads_branched.high
+                .map { [it.meta, it.reads[0], params.max_reads] }
+                .concat(
+                    ch_reads_branched.high
+                        .map { [it.meta, it.reads[1], params.max_reads] }
+                )
         )
-        ch_versions = ch_versions.mix(SEQTK_SAMPLE.out.versions)
-        // combine forward and reverse read channels
-        SEQTK_SAMPLE
+        ch_versions = ch_versions.mix(SEQTK_SAMPLE.out.versions.first())
+
+        // Recombine downsampled R1/R2 pairs
+        ch_reads = SEQTK_SAMPLE
             .out
             .reads
             .groupTuple(by: 0)
-            .concat(ch_reads.ok.map{ [ it.meta, it.reads ] })
-            .set{ ch_reads }
+            .concat(ch_reads_branched.ok.map { [it.meta, it.reads] })
     }
 
     // MODULE: NCBI Human Read Scrubber    
