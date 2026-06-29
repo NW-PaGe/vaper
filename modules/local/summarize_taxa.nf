@@ -15,8 +15,8 @@ process SUMMARIZE_TAXA {
     when:
     task.ext.when == null || task.ext.when
 
-    prefix = task.ext.prefix ?: "${meta.id}"
     script:
+    prefix = task.ext.prefix ?: "${meta.id}"
     tool="vaper_metagenome.py"
     """
     # summarize taxa at >= 1X coverage and >= 1% relative abundance
