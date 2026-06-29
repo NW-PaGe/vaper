@@ -3,7 +3,7 @@ process SELECT_REFS {
     label 'process_low'
 
     input:
-    tuple val(meta), path(assembly), val(include), val(exclude)
+    tuple val(meta), path(assembly), val(include_vals), val(exclude_vals)
     path refs
     
     output:
@@ -24,8 +24,8 @@ process SELECT_REFS {
         --query "${assembly}" \\
         --genfrac ${params.ref_genfrac} \\
         --dist ${params.ref_dist} \\
-        ${include ? "--include '" + include.join(',') + "'" : ''} \\
-        ${exclude ? "--exclude '" + exclude.join(',') + "'" : ''}
+        ${include_vals ? "--include '" + include_vals.join(',') + "'" : ''} \\
+        ${exclude_vals ? "--exclude '" + exclude_vals.join(',') + "'" : ''}
 
     # version info
     cat <<-END_VERSIONS > versions.yml

@@ -89,7 +89,7 @@ workflow ASSEMBLE {
         .out
         .assembly
         .transpose()
-        .map{ meta, assembly -> [ meta, getRefName(assembly, meta.id), assembly ] }
+        .map{ meta, assembly -> [ meta, Utils.getRefName(assembly, meta.id), assembly ] }
         .set{ ch_consensus }
     
     ch_consensus.map{ meta, ref_name, assembly -> [meta, ref_name] }.set{ ch_remaining }
@@ -133,33 +133,4 @@ workflow ASSEMBLE {
     assembly_stats = ch_assembly_stats    // channel: [ val(meta), path(json) ]
     consensus      = ch_consensus         // channel: [ val(meta), val(ref_name), path(assembly) ]
     versions       = ch_versions
-}
-
-// Remove sample prefix and FASTA extensions, preserving periods in names.
-// sampleName: the ID of the sample (string), used to strip "sample-"
-def getRefName(filename, String sampleName) {
-    // Convert to string and strip any path
-    def name = filename.getName()
-
-    // Strip sampleName prefix: "<sampleName>-"
-    if (sampleName && name.startsWith(sampleName + "_")) {
-        name = name.substring((sampleName + "_").length())
-    }
-
-    // Handle .gz first
-    if (name.endsWith(".gz")) {
-        // strip .gz
-        name = name[0..-4]
-    }
-
-    // Now strip FASTA-style extensions
-    def fastaExts = [".fa", ".fna", ".fasta"]
-    for (ext in fastaExts) {
-        if (name.toLowerCase().endsWith(ext)) {
-            name = name[0..-(ext.size() + 1)]
-            break
-        }
-    }
-
-    return name
 }

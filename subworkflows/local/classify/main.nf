@@ -79,7 +79,7 @@ workflow CLASSIFY {
             .map{ meta, summary -> if(summary){
                     [ meta, summary ]
                 }else{
-                    fwork = file(workflow.workDir).resolve("${meta.id}-sm_summary.txt")
+                    def fwork = file(workflow.workDir).resolve("${meta.id}-sm_summary.txt")
                     fwork.text = '100% unclassified'
                     [ meta, fwork ]
                 }
@@ -136,7 +136,7 @@ workflow CLASSIFY {
             .fa
             .flatMap{ ref -> 
                 ref.collect{ 
-                    it -> [ getRefName(assembly, null), it ] 
+                    it -> [ Utils.getRefName(ref, null), it ] 
                 }  
             }
             .set{ ch_ref_map }
@@ -187,34 +187,4 @@ workflow CLASSIFY {
     sm_summary = ch_sm_summary          // channel: [ val(meta), val(result) ]
     versions   = ch_versions            // channel: [ versions.yml ]
 }
-
-// Remove sample prefix and FASTA extensions, preserving periods in names.
-// sampleName: the ID of the sample (string), used to strip "sample-"
-def getRefName(filename, String sampleName) {
-    // Convert to string and strip any path
-    def name = filename.getName()
-
-    // Strip sampleName prefix: "<sampleName>-"
-    if (sampleName && name.startsWith(sampleName + "_")) {
-        name = name.substring((sampleName + "_").length())
-    }
-
-    // Handle .gz first
-    if (name.endsWith(".gz")) {
-        // strip .gz
-        name = name[0..-4]
-    }
-
-    // Now strip FASTA-style extensions
-    def fastaExts = [".fa", ".fna", ".fasta"]
-    for (ext in fastaExts) {
-        if (name.toLowerCase().endsWith(ext)) {
-            name = name[0..-(ext.size() + 1)]
-            break
-        }
-    }
-
-    return name
-}
-
 

@@ -195,22 +195,22 @@ def create_sample_channel(row) {
     // keep your logic: include is the base, then add ref_* and dedupe via Set
     def include_ss  = ref_include ? ref_include.tokenize(';') : []
     def include_cli = ref_include ? ref_include.tokenize(';') : []
-    def include     = ((include_ss + include_cli + ref_names_pattern + ref_segment_pattern + ref_species_pattern + ref_taxon_pattern) as Set) as List
+    def include_set = ((include_ss + include_cli + ref_names_pattern + ref_segment_pattern + ref_species_pattern + ref_taxon_pattern) as Set) as List
 
     // exclude stays as you had it (semicolon-sep → comma string)
     def exclude_ss  = ref_exclude        ? ref_exclude.tokenize(';')        : []
     def exclude_cli = params.ref_exclude ? params.ref_exclude.tokenize(';') : []
-    def exclude     = ((exclude_ss + exclude_cli) as Set) as List
-    exclude         = exclude ? ((ref_taxon_pattern || ref_species_pattern || ref_segment_pattern || ref_names_pattern) ? ['*'] : []) : []
+    def exclude_set = ((exclude_ss + exclude_cli) as Set) as List
+    exclude_set     = exclude_set ? ((ref_taxon_pattern || ref_species_pattern || ref_segment_pattern || ref_names_pattern) ? ['*'] : []) : []
     
     //// Build output
-    out = [ 
+    def out = [ 
         meta: sample + ['single_end': false], 
         fastq_12: [ fastq_1, fastq_2 ], 
         sra: sra, 
         reference: ref_files,
-        include: include,
-        exclude: exclude
+        include: include_set,
+        exclude: exclude_set
     ]
     
     return out
