@@ -337,6 +337,7 @@ def _select_refs(groups, paf_con, threshold):
       1) If any member has gf >= threshold -> choose max by alignment length * ~ pid.
       2) Else if sum(group gfs) >= threshold -> choose max by alignment length * ~ pid.
       3) Else choose none.
+    Ties broken by reference name in alphabetical order.
     """
     LOGGER.debug(f"Selecting refs from {len(groups)} groups with GF threshold={threshold}")
     selected = []
@@ -353,12 +354,15 @@ def _select_refs(groups, paf_con, threshold):
     def score(n):
         return aln_of(n) * pid_of(n)
 
+    def best(names):
+        # Highest score wins; ties broken by alphabetically first name.
+        return sorted(names, key=lambda n: (-score(n), n))[0]
+
     for g in groups:
         names = list(g)
 
-        # Group sum meets threshold
         if sum(gf_of(n) for n in names) >= threshold and names:
-            selected.append(max(names, key=score))
+            selected.append(best(names))
             continue
 
     LOGGER.info(f"Selection complete: selected={len(selected)} (threshold={threshold})")
@@ -553,7 +557,7 @@ def main():
     Command-line entry point for VAPER reference formatting.
     Processes reference JSONL files and optionally maps a query assembly.
     """
-    version = "1.0"
+    version = "1.0.1"
 
     parser = argparse.ArgumentParser(
         description="VAPER reference processing and selection tool"
