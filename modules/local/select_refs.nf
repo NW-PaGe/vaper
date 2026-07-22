@@ -22,8 +22,8 @@ process SELECT_REFS {
     ${tool} \\
         --refs "${refs}" \\
         --query "${assembly}" \\
-        --genfrac ${params.ref_genfrac} \\
-        --dist ${params.ref_dist} \\
+        --min-query-cov ${params.ref_min_query_cov} \\
+        --min-ref-cov ${params.ref_min_ref_cov} \\
         ${include_vals ? "--include '" + include_vals.join(',') + "'" : ''} \\
         ${exclude_vals ? "--exclude '" + exclude_vals.join(',') + "'" : ''}
 

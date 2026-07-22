@@ -8,19 +8,16 @@ import csv
 import gzip
 import json
 import os
+import random
 import subprocess
 from pathlib import Path
 from collections import defaultdict
-from typing import Any, Dict, List, Tuple, Set
-
-import numpy as np
-import sourmash
-from sklearn.cluster import DBSCAN
+from typing import Any, List
+from itertools import combinations
 
 from vaper_utils import logging_config, get_ref_name
 
 LOGGER = logging_config()
-
 
 def _create_ref_map(data: list[dict[str, Any]]):
     """Create ID and metadata maps for quick lookups."""
@@ -252,280 +249,6 @@ def _create_subset(id_map, names, prefix="subset"):
     LOGGER.info(f"Subset exports complete: JSONL={jsonl_path} (records={len(subset)}), FASTA={fasta_path}")
 
 
-def _compare_refs(data, names, ksize, scaled, threshold, outdir):
-    """
-    Build MinHashes for selected names and cluster with DBSCAN (min_samples=1).
-    Saves grouping results to <outdir>/reference_groups.json.
-    Returns list of sets (groups).
-    """
-    LOGGER.info(f"Comparing refs (names={len(names)}, ksize={ksize}, scaled={scaled}, threshold={threshold})")
-
-    # Ensure outdir exists
-    outdir = Path(outdir)
-    outdir.mkdir(parents=True, exist_ok=True)
-    outfile = outdir / "reference_groups.json"
-
-    # Build MinHashes for requested names
-    subset = {}
-    for rec in data:
-        nm = rec.get("name")
-        if nm in names:
-            mh = sourmash.MinHash(n=0, ksize=ksize, scaled=scaled)
-            mh.add_sequence(rec["sequence"], force=True)
-            subset[nm] = mh
-
-    LOGGER.info(f"Built MinHashes: {len(subset)} of {len(names)} requested names present")
-
-    if not subset:
-        LOGGER.info("Reference grouping complete: groups=0, pairwise=0")
-
-        # Save empty file
-        with outfile.open("w", encoding="utf-8") as f:
-            json.dump([], f, indent=2)
-
-        LOGGER.info(f"Wrote reference grouping results to {outfile}")
-        return []
-
-    ids = list(subset.keys())
-    n = len(ids)
-
-    # Precompute pairwise distances for DBSCAN
-    mat = np.zeros((n, n), dtype=float)
-    pairwise = 0
-    for i in range(n):
-        m1 = subset[ids[i]]
-        for j in range(i + 1, n):
-            d = m1.containment_ani(subset[ids[j]]).dist
-            mat[i, j] = mat[j, i] = d
-            pairwise += 1
-
-    # Cluster with DBSCAN
-    db = DBSCAN(eps=threshold, min_samples=1, metric="precomputed").fit(mat)
-    labels = db.labels_
-
-    # Build groups from labels
-    clusters = {}
-    noise = []
-    for idx, lbl in enumerate(labels):
-        if lbl == -1:
-            noise.append({ids[idx]})
-        else:
-            clusters.setdefault(int(lbl), set()).add(ids[idx])
-
-    groups = list(clusters.values()) + noise
-
-    # Log summary
-    if groups:
-        sizes = sorted((len(g) for g in groups), reverse=True)
-        LOGGER.info(f"Reference grouping complete: groups={len(groups)}, pairwise={pairwise}, largest_group={sizes[0]}")
-    else:
-        LOGGER.info(f"Reference grouping complete: groups=0, pairwise={pairwise}")
-
-    # Save groups to JSON
-    serializable = [sorted(list(g)) for g in groups]
-    with outfile.open("w", encoding="utf-8") as f:
-        json.dump(serializable, f, indent=2)
-
-    LOGGER.info(f"Wrote reference grouping results to {outfile}")
-
-    return groups
-
-
-def _select_refs(groups, paf_con, threshold):
-    """
-    Select references per group:
-      1) If any member has gf >= threshold -> choose max by alignment length * ~ pid.
-      2) Else if sum(group gfs) >= threshold -> choose max by alignment length * ~ pid.
-      3) Else choose none.
-    """
-    LOGGER.debug(f"Selecting refs from {len(groups)} groups with GF threshold={threshold}")
-    selected = []
-
-    def gf_of(name):
-        return float(paf_con.get(name, {}).get("gf", 0.0))
-
-    def aln_of(name):
-        return int(paf_con.get(name, {}).get("aligned", 0))
-
-    def pid_of(name):
-        return float(paf_con.get(name, {}).get("pid", 0))
-
-    def score(n):
-        return aln_of(n) * pid_of(n)
-
-    for g in groups:
-        names = list(g)
-
-        # Group sum meets threshold
-        if sum(gf_of(n) for n in names) >= threshold and names:
-            selected.append(max(names, key=score))
-            continue
-
-    LOGGER.info(f"Selection complete: selected={len(selected)} (threshold={threshold})")
-    return selected
-
-def _consolidate_paf(data, outdir, out_paf="chosen.paf", target_summary="target-summary.csv"):
-    """
-    Calculate coverage statistics for reference targets from PAF alignments.
-    Also exports the selected (chosen) alignments to outdir/outfile as PAF.
-    """
-    LOGGER.debug(f"Consolidating PAF records (n={len(data)})")
-
-    # Ensure work dir exists early (so we can export chosen alignments)
-    outdir = Path(outdir)
-    outdir.mkdir(parents=True, exist_ok=True)
-
-    # ----------------------------
-    # 1) Group by query
-    # ----------------------------
-    by_query = defaultdict(list)
-    for rec in data:
-        by_query[rec["query"]].append(rec)
-
-    chosen = []
-
-    def _aln_len(rec):
-        if "align" in rec and rec["align"] is not None:
-            return int(rec["align"])
-        s, e = rec["tstart"], rec["tend"]
-        return abs(int(e) - int(s))
-
-    # 1.1) Choose the best alignment for each query (one per subject)
-    for q, recs in by_query.items():
-        recs_sorted = sorted(
-            recs,
-            key=lambda r: (
-                _aln_len(r),
-                int(r.get("qual", 0)),
-                str(r.get("target"))
-            ),
-            reverse=True,
-        )
-
-        used_subjects = set()
-        for r in recs_sorted:
-            subject = r["target"]
-            if subject not in used_subjects:
-                chosen.append(r)
-                used_subjects.add(subject)
-
-    LOGGER.info(
-        f"Selected best alignments: {len(chosen)} "
-        f"(queries={len(by_query)}, subject-region restriction)"
-    )
-
-    # ----------------------------
-    # 1.2) Export chosen alignments to work directory (PAF)
-    # ----------------------------
-    def _tags_to_str(rec):
-        tags = rec.get("tags")
-        if not tags:
-            return ""
-        # allow tags as dict -> "XX:Z:val" etc if already formatted, else coerce to Z
-        if isinstance(tags, dict):
-            parts = []
-            for k, v in tags.items():
-                if isinstance(v, tuple) and len(v) == 2:
-                    ttype, tval = v
-                    parts.append(f"{k}:{ttype}:{tval}")
-                else:
-                    parts.append(f"{k}:Z:{v}")
-            return "\t" + "\t".join(parts) if parts else ""
-        if isinstance(tags, (list, tuple)):
-            parts = [str(x) for x in tags if x is not None and str(x) != ""]
-            return "\t" + "\t".join(parts) if parts else ""
-        return "\t" + str(tags)
-
-    def _paf_line(rec):
-        # Required 12 PAF columns
-        qname = rec.get("query", "*")
-        qlen  = int(rec.get("qlen", 0))
-        qst   = int(rec.get("qstart", 0))
-        qen   = int(rec.get("qend", 0))
-        strand = rec.get("strand", "+")  # if you store it; else '+'
-        tname = rec.get("target", "*")
-        tlen  = int(rec.get("tlen", 0))
-        tst   = int(rec.get("tstart", 0))
-        ten   = int(rec.get("tend", 0))
-        nmatch = int(rec.get("match", rec.get("nmatch", 0)))
-        alnlen = int(rec.get("align", rec.get("alnlen", 0)))
-        mapq   = int(rec.get("qual", rec.get("mapq", 0)))
-
-        core = [qname, qlen, qst, qen, strand, tname, tlen, tst, ten, nmatch, alnlen, mapq]
-        return "\t".join(map(str, core)) + _tags_to_str(rec) + "\n"
-
-    chosen_path = outdir / out_paf
-    with chosen_path.open("w", newline="") as fh:
-        for rec in chosen:
-            fh.write(_paf_line(rec))
-    LOGGER.info(f"Wrote selected alignments to {chosen_path}")
-
-    # ----------------------------
-    # 2) Compute coverage using only chosen alignments
-    # ----------------------------
-    out = {}
-    cov = {}
-    pid = {}
-
-    for rec in chosen:
-        q = rec["query"]
-        t = rec["target"]
-        L = rec["tlen"]
-        s, e = rec["tstart"], rec["tend"]
-        if e < s:
-            s, e = e, s
-
-        if t not in cov:
-            cov[t] = np.zeros(L, dtype=int)
-            out[t] = {"hits": [q]}
-            LOGGER.debug(f"New target: {t} (length={L})")
-
-        if q not in out[t]["hits"]:
-            out[t]["hits"].append(q)
-
-        s = max(0, min(int(s), cov[t].size))
-        e = max(s, min(int(e), cov[t].size))
-        cov[t][s:e] = True
-
-        aligned = rec['align'  ]  
-        matches = rec['matches']
-
-        if t not in pid:
-            pid[t] = {'matches': matches, 'aligned': aligned}
-        else:
-            pid[t]['matches'] += matches
-            pid[t]['aligned'] += aligned
-
-    LOGGER.debug(f"Computing coverage and pid for {len(cov)} targets")
-
-    for t, v in cov.items():
-        length = v.size
-        cov_val = int(v.sum())
-        gf = cov_val / length if length else 0.0
-        pid_val = pid[t]["matches"] / pid[t]["aligned"] if pid[t]["aligned"] > 0 else 0
-        out[t]["length"] = float(length)
-        out[t]["aligned"] = float(cov_val)
-        out[t]["gf"] = float(gf)
-        out[t]["pid"] = float(pid_val)
-        LOGGER.debug(f"Target {t}: coverage={gf:.3f}, pid~={pid_val:.3f}, hits={len(out[t]['hits'])}")
-
-    summary_path = outdir / target_summary
-    with summary_path.open("w", newline="") as fh:
-        writer = csv.writer(fh)
-        writer.writerow(["target", "length", "aligned", "gf", "pid", "num_hits"])
-        for target in sorted(out.keys(), key=lambda t: out[t]["gf"], reverse=True):
-            writer.writerow([
-                target,
-                out[target]["length"],
-                out[target]["aligned"],
-                out[target]["gf"],
-                out[target]["pid"],
-                len(out[target]["hits"]),
-            ])
-
-    LOGGER.info(f"Wrote target summary to {summary_path}")
-    return out
-
 def _validate(data: List[dict]) -> None:
     """Validate reference records for required fields, bases, and name uniqueness."""
     LOGGER.debug(f"Validating {len(data)} reference records")    
@@ -547,23 +270,428 @@ def _validate(data: List[dict]) -> None:
 
     LOGGER.info("Input passed validation")
 
+def _match_rate(rec):
+    """Matches per aligned base for a single alignment record."""
+    aln = rec.get("align", 0)
+    return rec.get("matches", 0) / aln if aln else 0.0
+
+
+def estimate_target_matches(recs):
+    """
+    Estimate total matches for one reference while removing duplicated
+    contributions from overlapping contigs.
+    """
+    queries = list(recs.values())
+    total = sum(r.get("matches", 0) for r in queries)
+
+    rates = {id(r): _match_rate(r) for r in queries}
+
+    bounds = sorted(
+        {r["tstart"] for r in queries} |
+        {r["tend"] for r in queries}
+    )
+
+    for a, b in zip(bounds, bounds[1:]):
+        seg = b - a
+        if seg <= 0:
+            continue
+
+        covering = [
+            r for r in queries
+            if r["tstart"] <= a and r["tend"] >= b
+        ]
+
+        if len(covering) < 2:
+            continue
+
+        for r in covering:
+            total -= rates[id(r)] * seg
+
+        total += max(rates[id(r)] for r in covering) * seg
+
+    return total
+
+
+def build_maps(paf, min_qcov=0.50):
+    """
+    Build contig->references and reference->contigs maps.
+
+    Alignments whose query coverage (matches / query length) is below
+    ``min_qcov`` are discarded before the maps are built.
+    """
+
+    contig_to_refs = defaultdict(set)
+    ref_to_contigs = defaultdict(set)
+    ref_records = defaultdict(dict)
+
+    kept = 0
+    dropped = 0
+
+    for rec in paf:
+
+        q = rec["query"]
+        t = rec["target"]
+
+        qlen = rec.get("qlen", 0)
+        qcov = rec["matches"] / qlen if qlen else 0.0
+
+        if qcov < min_qcov:
+            dropped += 1
+            LOGGER.debug(
+                f"Dropped alignment {q} -> {t}: query coverage "
+                f"{qcov:.3f} < min_qcov={min_qcov}"
+            )
+            continue
+
+        kept += 1
+        contig_to_refs[q].add(t)
+        ref_to_contigs[t].add(q)
+
+        ref_records[t][q] = rec
+
+    LOGGER.info(
+        f"Query-coverage filter (min_qcov={min_qcov}): kept {kept} / {len(paf)} "
+        f"alignments (dropped {dropped}); "
+        f"contigs={len(contig_to_refs)}, references={len(ref_to_contigs)}"
+    )
+
+    return contig_to_refs, ref_to_contigs, ref_records
+
+
+def collapse_reference_groups(ref_to_contigs):
+    """
+    Collapse references that explain identical sets of contigs.
+
+    Returns
+
+    group_members:
+        group_id -> set(reference)
+
+    group_cover:
+        group_id -> set(contigs)
+    """
+
+    coverage_map = defaultdict(set)
+
+    for ref, contigs in ref_to_contigs.items():
+        coverage_map[frozenset(contigs)].add(ref)
+
+    group_members = {}
+    group_cover = {}
+
+    for i, (cover, refs) in enumerate(coverage_map.items()):
+        gid = f"group{i+1}"
+        group_members[gid] = refs
+        group_cover[gid] = set(cover)
+
+    return group_members, group_cover
+
+
+def minimum_cover_groups(group_cover, all_contigs):
+    """
+    Find every minimum-cardinality group combination that covers all contigs.
+    """
+
+    groups = list(group_cover)
+
+    for k in range(1, len(groups) + 1):
+
+        solutions = []
+
+        for combo in combinations(groups, k):
+
+            covered = set()
+
+            for g in combo:
+                covered |= group_cover[g]
+
+            if covered >= all_contigs:
+                solutions.append(combo)
+
+        if solutions:
+            return solutions
+
+    return []
+
+
+def _reference_coverage(ref, ref_records):
+    """
+    Estimate coverage statistics for a single reference.
+
+    Returns a dict with est_matches (de-duplicated across overlapping contigs),
+    ref_len, explained_fraction (est_matches / ref_len), and num_contigs.
+    """
+    recs = ref_records[ref]
+    est_matches = estimate_target_matches(recs)
+    ref_len = max(r["tlen"] for r in recs.values())
+    frac = est_matches / ref_len if ref_len else 0.0
+    return {
+        "est_matches": est_matches,
+        "ref_len": ref_len,
+        "explained_fraction": frac,
+        "num_contigs": len(recs),
+    }
+
+
+def _write_selection_metrics(
+    scored,
+    outdir,
+    ranking_file="reference-selection.csv",
+    selected_file="selected-references.csv",
+):
+    """
+    Write reference-selection metrics to the work directory for troubleshooting.
+
+    ``scored`` is the ranked list of group-solution metric dicts (best first;
+    the selected solution is placed first and flagged via its ``selected`` key).
+
+    - ranking_file:  one row per group solution, in ranked order, with the total
+      coverage used to choose between them plus supporting stats (number of
+      references, summed estimated matches, and the minimum / average explained
+      fraction).
+    - selected_file: the per-reference breakdown of the winning set.
+
+    An empty ``scored`` still writes headers so downstream steps always find the
+    files.
+    """
+    outdir = Path(outdir)
+    outdir.mkdir(parents=True, exist_ok=True)
+
+    ranking_path = outdir / ranking_file
+    with ranking_path.open("w", newline="") as fh:
+        writer = csv.writer(fh)
+        writer.writerow([
+            "rank", "selected", "num_refs", "total_coverage", "summed_est_matches",
+            "min_explained_fraction", "avg_explained_fraction", "references",
+        ])
+        for rank, m in enumerate(scored, start=1):
+            writer.writerow([
+                rank,
+                "yes" if m.get("selected", rank == 1) else "no",
+                m["num_refs"],
+                f"{m['total_coverage']:.4f}",
+                f"{m['summed_est_matches']:.4f}",
+                f"{m['min_explained_fraction']:.4f}",
+                f"{m['avg_explained_fraction']:.4f}",
+                ";".join(sorted(m["references"])),
+            ])
+    LOGGER.info(
+        f"Wrote reference-selection ranking to {ranking_path} "
+        f"(solutions={len(scored)})"
+    )
+
+    selected_path = outdir / selected_file
+    with selected_path.open("w", newline="") as fh:
+        writer = csv.writer(fh)
+        writer.writerow([
+            "reference", "est_matches", "ref_len",
+            "explained_fraction", "num_contigs",
+        ])
+        if scored:
+            best = scored[0]
+            for ref in sorted(best["references"]):
+                d = best["per_ref"][ref]
+                writer.writerow([
+                    ref,
+                    f"{d['est_matches']:.4f}",
+                    d["ref_len"],
+                    f"{d['explained_fraction']:.4f}",
+                    d["num_contigs"],
+                ])
+    LOGGER.info(f"Wrote selected-reference metrics to {selected_path}")
+
+
+def choose_best_reference_set(paf, min_query_cov=0.50, min_ref_cov=0.70, outdir=None):
+    """
+    Select the best set of references explaining the query contigs.
+
+    The candidate reference sets are the minimum-cardinality group combinations
+    that cover every contig. Each reference belonging to a group solution has its
+    coverage estimated exactly once; within each group the best-covered member
+    (meeting ``min_ref_cov``) is used as the representative. The total coverage of
+    a group solution is the summed explained fraction of its representatives, and
+    the solution with the highest total coverage is selected. Ties are broken at
+    random.
+
+    When ``outdir`` is provided, the ranked table of group solutions and the
+    winning set's per-reference breakdown are written there for troubleshooting.
+
+    Returns a list of (total_coverage, references) tuples with the selected
+    solution first, or an empty list if no complete, qualifying reference set
+    exists.
+    """
+    LOGGER.info(
+        f"Selecting reference set: alignments={len(paf)}, "
+        f"min_query_cov={min_query_cov}, min_ref_cov={min_ref_cov}"
+    )
+
+    (
+        contig_to_refs,
+        ref_to_contigs,
+        ref_records,
+    ) = build_maps(paf, min_qcov=min_query_cov)
+
+    all_contigs = set(contig_to_refs)
+
+    if not all_contigs:
+        LOGGER.warning(
+            f"No contigs passed the query-coverage filter (min_query_cov="
+            f"{min_query_cov}); no reference set can be formed. Consider "
+            f"lowering --min-query-cov or checking the query assembly."
+        )
+        if outdir is not None:
+            _write_selection_metrics([], outdir)
+        return []
+
+    group_members, group_cover = collapse_reference_groups(
+        ref_to_contigs
+    )
+    LOGGER.info(
+        f"Collapsed {len(ref_to_contigs)} reference(s) into "
+        f"{len(group_members)} group(s) of identical contig coverage"
+    )
+
+    group_solutions = minimum_cover_groups(
+        group_cover,
+        all_contigs,
+    )
+
+    if not group_solutions:
+        LOGGER.warning(
+            f"No combination of references covers all {len(all_contigs)} "
+            f"contig(s); cannot form a complete reference set."
+        )
+        if outdir is not None:
+            _write_selection_metrics([], outdir)
+        return []
+
+    LOGGER.info(
+        f"Minimum cover uses {len(group_solutions[0])} group(s); "
+        f"{len(group_solutions)} equivalent solution(s) found"
+    )
+
+    # Estimate coverage once for every reference that belongs to a group
+    # solution. References within a group are interchangeable only in which
+    # contigs they explain, so each is scored on its own merits.
+    used_groups = set()
+    for solution in group_solutions:
+        used_groups.update(solution)
+
+    ref_coverage = {}
+    for g in used_groups:
+        for ref in group_members[g]:
+            if ref not in ref_coverage:
+                ref_coverage[ref] = _reference_coverage(ref, ref_records)
+
+    LOGGER.info(
+        f"Estimated coverage for {len(ref_coverage)} reference(s) across "
+        f"{len(used_groups)} group(s)"
+    )
+
+    # Each group's representative is its best-covered member that meets
+    # min_ref_cov; a group with no qualifying member contributes nothing.
+    group_rep = {}
+    for g in used_groups:
+        eligible = [
+            r for r in group_members[g]
+            if ref_coverage[r]["explained_fraction"] >= min_ref_cov
+        ]
+        if eligible:
+            group_rep[g] = max(
+                eligible,
+                key=lambda r: ref_coverage[r]["explained_fraction"],
+            )
+        else:
+            group_rep[g] = None
+            LOGGER.debug(f"Group {g}: no member meets min_ref_cov={min_ref_cov}")
+
+    # Total coverage of each group solution = summed explained fraction of its
+    # representatives.
+    scored = []
+    for solution in group_solutions:
+        reps = [group_rep[g] for g in solution if group_rep[g] is not None]
+        if not reps:
+            continue
+        fractions = [ref_coverage[r]["explained_fraction"] for r in reps]
+        total_coverage = sum(fractions)
+        scored.append({
+            "references": reps,
+            "num_refs": len(reps),
+            "total_coverage": total_coverage,
+            "summed_est_matches": sum(ref_coverage[r]["est_matches"] for r in reps),
+            "min_explained_fraction": min(fractions),
+            "avg_explained_fraction": total_coverage / len(fractions),
+            "per_ref": {r: ref_coverage[r] for r in reps},
+        })
+
+    LOGGER.info(
+        f"{len(scored)} of {len(group_solutions)} group solution(s) yielded a "
+        f"qualifying reference set (min_ref_cov={min_ref_cov})"
+    )
+
+    if not scored:
+        LOGGER.warning(
+            f"No group solution met the reference-coverage threshold "
+            f"(min_ref_cov={min_ref_cov}); nothing selected. Consider lowering "
+            f"--min-ref-cov."
+        )
+        if outdir is not None:
+            _write_selection_metrics([], outdir)
+        return []
+
+    # Select the group solution with the best total coverage; break ties at
+    # random.
+    best_total = max(m["total_coverage"] for m in scored)
+    tied = [m for m in scored if m["total_coverage"] == best_total]
+    winner = random.choice(tied)
+
+    if len(tied) > 1:
+        LOGGER.info(
+            f"{len(tied)} group solution(s) tied at total coverage "
+            f"{best_total:.4f}; selected one at random"
+        )
+    else:
+        LOGGER.info(f"Best total coverage {best_total:.4f} (single best solution)")
+
+    # Winner first, remaining solutions by total coverage (for metrics / return).
+    rest = sorted(
+        (m for m in scored if m is not winner),
+        key=lambda m: m["total_coverage"],
+        reverse=True,
+    )
+    ranked = [winner] + rest
+    for m in ranked:
+        m["selected"] = m is winner
+
+    LOGGER.info(
+        f"Selected reference set: references={sorted(winner['references'])}, "
+        f"num_refs={winner['num_refs']}, "
+        f"total_coverage={winner['total_coverage']:.3f}, "
+        f"summed_est_matches={winner['summed_est_matches']:.1f}, "
+        f"min_explained_fraction={winner['min_explained_fraction']:.3f}, "
+        f"avg_explained_fraction={winner['avg_explained_fraction']:.3f}"
+    )
+
+    if outdir is not None:
+        _write_selection_metrics(ranked, outdir)
+
+    return [(m["total_coverage"], m["references"]) for m in ranked]
+
 
 def main():
     """
     Command-line entry point for VAPER reference formatting.
     Processes reference JSONL files and optionally maps a query assembly.
     """
-    version = "1.0"
+    version = "2.0"
 
     parser = argparse.ArgumentParser(
         description="VAPER reference processing and selection tool"
     )
     parser.add_argument("--refs", required=True, help="Path to reference JSONL file.")
     parser.add_argument("--query", help="Path to query assembly.")
-    parser.add_argument("--genfrac", type=float, default=0.50, help="Genome fraction threshold to select a reference.")
-    parser.add_argument("--dist", type=float, default=0.20, help="Distance threshold used to cluster references (1 - ANI/100).")
-    parser.add_argument("--scaled", type=int, default=1, help="MinHash scaled factor.")
-    parser.add_argument("--ksize", type=int, default=31, help="MinHash k-mer size.")
+    parser.add_argument("--min-query-cov", type=float, default=0.50, help="Minimum query (contig) coverage for an alignment to be considered.")
+    parser.add_argument("--min-ref-cov", type=float, default=0.70, help="Minimum reference coverage (explained fraction) for a reference to be selected.")
     parser.add_argument("--include", help="Comma separated list of references to include (name=value or key=value).")
     parser.add_argument("--exclude", help="Comma separated list of references to exclude (name=value or key=value).")
     parser.add_argument("--outdir", default='.', help="Output directory")
@@ -614,13 +742,13 @@ def main():
     ref = _dict_to_fasta(id_map, os.path.join(work_dir, "ref.fa"), exclude)
     paf_file = _run_minimap2(ref, args.query, os.path.join(work_dir, "map.paf"))
     paf_data = _read_paf(paf_file)
-    paf_data_con = _consolidate_paf(paf_data, work_dir)
-
-    targets = sorted(list(paf_data_con.keys()))
-    LOGGER.info(f"Targets detected from PAF: {len(targets)}")
-
-    groups = _compare_refs(data, targets, args.ksize, args.scaled, args.dist, work_dir)
-    selected = _select_refs(groups, paf_data_con, args.genfrac)
+    ranked = choose_best_reference_set(
+        paf_data,
+        min_query_cov=args.min_query_cov,
+        min_ref_cov=args.min_ref_cov,
+        outdir=work_dir,
+    )
+    selected = ranked[0][1] if ranked else []
 
     if include_names:
         before = len(selected)
@@ -628,6 +756,7 @@ def main():
         LOGGER.info(f"Adding references specified by name: before={before}, added={len(include_names)}, after={len(selected)}")
         
     if selected:
+        LOGGER.info(f"Final selected references ({len(selected)}): {sorted(selected)}")
         _create_subset(id_map, selected)
     else:
         LOGGER.info("No references met selection criteria.")
