@@ -108,16 +108,16 @@
                     "description": "Reference selection mode ('standard', 'sensitive', 'kitchen-sink', or null",
                     "fa_icon": "fab fa-buffer"
                 },
-                "ref_genfrac": {
+                "ref_min_query_cov": {
                     "type": "number",
-                    "default": 0.5,
-                    "description": "Minimum genome fraction used for reference selection.",
+                    "default": 0.1,
+                    "description": "Minimum coverage of assembly contigs when comparing to references.",
                     "fa_icon": "fas fa-chart-pie"
                 },
-                "ref_dist": {
+                "ref_min_ref_cov": {
                     "type": "number",
-                    "default": 0.2,
-                    "description": "Average nucleotide difference used to cluster references during reference selection (`1 - ( % ANI / 100 )`).",
+                    "default": 0.5,
+                    "description": "Minimum coverage required to select a reference.",
                     "fa_icon": "fas fa-chart-pie"
                 },
                 "ref_denovo_assembler": {
