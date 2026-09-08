@@ -163,8 +163,8 @@ def create_sample_channel(row) {
     //    References
     // ===================================================
     // ---------- reference paths (not in reference set) ----------
-    def ref_file_ss  = ref_file        ? ref_file.tokenize(';').collect { file(it, checkIfExists: true) }        : []
-    def ref_file_cli = params.ref_file ? params.ref_file.tokenize(' ').collect { file(it, checkIfExists: true) } : []
+    def ref_file_ss  = ref_file        ? ref_file.toString().tokenize(';').collect { file(it, checkIfExists: true) }        : []
+    def ref_file_cli = params.ref_file ? params.ref_file.toString().tokenize(' ').collect { file(it, checkIfExists: true) } : []
     def ref_files    = ((ref_file_ss + ref_file_cli) as Set) as List   // dedupe
 
     // ---------- reference names (in reference set) ----------
