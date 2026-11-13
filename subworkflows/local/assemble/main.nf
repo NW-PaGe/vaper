@@ -3,6 +3,8 @@
 //
 
 include { BWA_MEM        } from '../../../modules/local/bwa_mem'
+include { RASUSA_ALN     } from '../../../modules/local/rasusa_aln'
+include { SORT_ALN       } from '../../../modules/local/sort_aln'
 include { IVAR_CONSENSUS } from '../../../modules/local/ivar_consensus'
 include { ASSEMBLY_TIDY  } from '../../../modules/local/assembly_tidy'
 include { CONDENSE       } from '../../../modules/local/condense'
@@ -32,13 +34,33 @@ workflow ASSEMBLE {
     )
     ch_versions = ch_versions.mix(BWA_MEM.out.versions)
 
-    BWA_MEM.out.bam.set{ ch_bam }
+    BWA_MEM.out.bam.set{ ch_bam_full }
 
-    // Module: Get BAM stats
+    // Module: Get BAM stats (always from the full alignment)
     BAM_STATS (
-        ch_bam
+        ch_bam_full
     )
     ch_versions = ch_versions.mix(BAM_STATS.out.versions)
+
+    /* 
+    =============================================================================================================================
+        SUBSAMPLE ALIGNMENTS
+        - randomly subsample each alignment to a maximum per-position depth (--cons_max_depth)
+        - the full alignment is used for stats / read export; the subsampled alignment is used for consensus calling
+    =============================================================================================================================
+    */
+    // MODULE: Randomly subsample alignments with Rasusa
+    RASUSA_ALN (
+        ch_bam_full
+    )
+    ch_versions = ch_versions.mix(RASUSA_ALN.out.versions)
+
+    // MODULE: Coordinate-sort the subsampled alignments
+    SORT_ALN (
+        RASUSA_ALN.out.bam
+    )
+    ch_versions = ch_versions.mix(SORT_ALN.out.versions)
+    SORT_ALN.out.bam.set{ ch_bam_sub }
 
     // Assemblies are created separately for each reference contig
     BAM_STATS
@@ -46,10 +68,14 @@ workflow ASSEMBLE {
         .coverage
         .splitCsv(header: true, sep: "\t")
         .map{meta, data -> [meta, data["#rname"]]}
-        .combine(ch_bam, by: 0)
-        .set{ch_bam}
-    
-    // MODULE: Run Ivar
+        .set{ ch_contigs }
+
+    // channel: [ meta, ref_id, subsampled_bam ]
+    ch_contigs
+        .combine(ch_bam_sub, by: 0)
+        .set{ ch_bam }
+
+    // MODULE: Run Ivar on the subsampled alignment
     IVAR_CONSENSUS (
         ch_bam
     )
@@ -94,11 +120,12 @@ workflow ASSEMBLE {
     
     ch_consensus.map{ meta, ref_name, assembly -> [meta, ref_name] }.set{ ch_remaining }
 
-    // Publish alignments of condensed assemblies
+    // Publish alignments (full + subsampled) of condensed assemblies
+    // channel: [ meta, ref_id, ref_path, full_bam, subsampled_bam ]
     EXPORT_ALN (
         ch_remaining
           .combine( ch_ref_set.map{ meta, ref_path, reads -> [ meta, ref_path ] }, by: 0 )
-          .join( ch_bam, by: [ 0, 1 ] )
+          .join( ch_contigs.combine( ch_bam_full.join( ch_bam_sub, by: 0 ), by: 0 ), by: [ 0, 1 ] )
     )
 
     // Export mapped reads for condensed assemblies

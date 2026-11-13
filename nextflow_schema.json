@@ -210,7 +210,7 @@
                 "cons_max_depth": {
                     "type": "integer",
                     "default": 100,
-                    "description": "Maximum read depth per assembly.",
+                    "description": "Maximum per-position read depth used for consensus calling. Alignments are randomly subsampled to this depth with Rasusa before the pileup; both the full and subsampled alignments are saved.",
                     "fa_icon": "fas fa-chart-pie"
                 },
                 "cons_condist": {

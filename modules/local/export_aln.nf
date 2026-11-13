@@ -4,7 +4,7 @@ process EXPORT_ALN {
     stageInMode 'copy'
 
     input:
-    tuple val(meta), val(ref_id), path(ref), path(bam)
+    tuple val(meta), val(ref_id), path(ref), path(bam), path(bam_sub)
     
     output:
     tuple val(meta), path("*.bam*", includeInputs: true)
@@ -19,8 +19,9 @@ process EXPORT_ALN {
     def args = task.ext.args ?: ''
     prefix = "${meta.id}-${ref_id}"
     """
-    # index bam
+    # index the full and subsampled bam
     samtools index ${bam}
+    samtools index ${bam_sub}
 
     gzip -d "${ref}"
     samtools faidx *.fa

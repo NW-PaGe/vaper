@@ -27,9 +27,11 @@ process IVAR_CONSENSUS {
     samtools index ${bam}
 
     # create mpilup and call consensus
+    # depth is capped upstream by random subsampling (RASUSA_ALN; --cons_max_depth),
+    # so the mpileup depth limit is disabled here (-d 0)
     samtools mpileup \\
         -aa -A -Q 0 \
-        -d ${params.cons_max_depth} \\
+        -d 0 \\
         -r ${ref_id} ${bam} | \\
         ivar consensus \\
         -p ${prefix} \\
