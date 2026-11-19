@@ -1,0 +1,39 @@
+Changes in component 'nf-core/sourmash/gather'
+'modules/nf-core/sourmash/gather/meta.yml' is unchanged
+'modules/nf-core/sourmash/gather/environment.yml' is unchanged
+Changes in 'sourmash/gather/main.nf':
+--- modules/nf-core/sourmash/gather/main.nf
++++ modules/nf-core/sourmash/gather/main.nf
+@@ -34,6 +34,7 @@
+     def prefetch    = save_prefetch     ? "--save-prefetch ${prefix}_prefetch.sig.zip"       : ''
+     def prefetchcsv = save_prefetch_csv ? "--save-prefetch-csv ${prefix}_prefetch.csv.gz"    : ''
+     """
++    status=0
+     sourmash gather \\
+         $args \\
+         --output ${prefix}.csv.gz \\
+@@ -42,7 +43,18 @@
+         ${prefetch} \\
+         ${prefetchcsv} \\
+         ${signature} \\
+-        ${database}
++        ${database} \\
++        2> gather.err || status=\$?
++
++    cat gather.err >&2
++
++    if [ \$status -ne 0 ]; then
++        if grep -q "no query hashes" gather.err; then
++            echo "WARNING: ${meta.id} signature has no hashes (likely NTC/low-read sample); no classification performed." >&2
++        else
++            exit \$status
++        fi
++    fi
+ 
+     cat <<-END_VERSIONS > versions.yml
+     "${task.process}":
+
+'modules/nf-core/sourmash/gather/tests/nextflow.config' is unchanged
+'modules/nf-core/sourmash/gather/tests/main.nf.test.snap' is unchanged
+'modules/nf-core/sourmash/gather/tests/main.nf.test' is unchanged
+************************************************************
