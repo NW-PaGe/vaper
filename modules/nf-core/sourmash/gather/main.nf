@@ -34,6 +34,7 @@ process SOURMASH_GATHER {
     def prefetch    = save_prefetch     ? "--save-prefetch ${prefix}_prefetch.sig.zip"       : ''
     def prefetchcsv = save_prefetch_csv ? "--save-prefetch-csv ${prefix}_prefetch.csv.gz"    : ''
     """
+    status=0
     sourmash gather \\
         $args \\
         --output ${prefix}.csv.gz \\
@@ -42,7 +43,18 @@ process SOURMASH_GATHER {
         ${prefetch} \\
         ${prefetchcsv} \\
         ${signature} \\
-        ${database}
+        ${database} \\
+        2> gather.err || status=\$?
+
+    cat gather.err >&2
+
+    if [ \$status -ne 0 ]; then
+        if grep -q "no query hashes" gather.err; then
+            echo "WARNING: ${meta.id} signature has no hashes (likely NTC/low-read sample); no classification performed." >&2
+        else
+            exit \$status
+        fi
+    fi
 
     cat <<-END_VERSIONS > versions.yml
     "${task.process}":
