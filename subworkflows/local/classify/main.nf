@@ -45,7 +45,7 @@ workflow CLASSIFY {
         // MODULE: Classify viral species in each sample using Sourmash
         SOURMASH_GATHER (
             SOURMASH_SKETCH.out.signatures,
-            params.sm_db,
+            Utils.stageOnce(params.sm_db),
             false,
             false,
             false,
@@ -56,7 +56,7 @@ workflow CLASSIFY {
         // MODULE: Summarize taxa from sourmash gather
         SOURMASH_METAGENOME (
             SOURMASH_GATHER.out.result,
-            file(params.sm_taxa, checkIfExists: true)
+            Utils.stageOnce(params.sm_taxa)
         )
         ch_versions = ch_versions.mix(SOURMASH_METAGENOME.out.versions)
 
